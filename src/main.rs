@@ -1,12 +1,10 @@
 use zellij_tile::prelude::*;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 struct State {
     permissions_granted: bool,
-    current_term_command: Option<String>,
-    command_queue: VecDeque<Command>,
 
     // Configuration
     move_mod: Vec<Mod>,
@@ -43,7 +41,7 @@ impl ZellijPlugin for State {
             PermissionType::ChangeApplicationState,
             PermissionType::ReadApplicationState,
         ]);
-        subscribe(&[EventType::PermissionRequestResult, EventType::ListClients]);
+        subscribe(&[EventType::PermissionRequestResult]);
         if self.permissions_granted {
             hide_self();
         }
@@ -51,14 +49,6 @@ impl ZellijPlugin for State {
 
     fn update(&mut self, event: Event) -> bool {
         match event {
-            Event::ListClients(list) => {
-                self.current_term_command = term_command_from_client_list(list);
-
-                if !self.command_queue.is_empty() {
-                    let command = self.command_queue.pop_front().unwrap();
-                    self.execute_command(command);
-                }
-            }
             Event::PermissionRequestResult(permission) => {
                 self.permissions_granted = match permission {
                     PermissionStatus::Granted => true,
@@ -85,8 +75,6 @@ impl Default for State {
     fn default() -> Self {
         Self {
             permissions_granted: false,
-            current_term_command: None,
-            command_queue: VecDeque::new(),
 
             move_mod: vec![Mod::Ctrl],
             resize_mod: vec![Mod::Alt],
@@ -96,12 +84,7 @@ impl Default for State {
 }
 
 impl State {
-    fn handle_command(&mut self, command: Command) {
-        self.command_queue.push_back(command);
-        list_clients();
-    }
-
-    fn execute_command(&mut self, command: Command) {
+    fn handle_command(&self, command: Command) {
         if self.current_pane_is_vim() {
             write_chars(&self.command_to_keybind(&command));
             return;
@@ -116,13 +99,26 @@ impl State {
         }
     }
 
+    /// Uses the synchronous API to check if the focused pane is running vim/nvim.
+    /// Replaces the old async `list_clients()` + `Event::ListClients` approach.
     fn current_pane_is_vim(&self) -> bool {
-        if let Some(current_command) = &self.current_term_command {
-            if current_command == "nvim" || current_command == "vim" {
-                return true;
-            }
+        let (_, pane_id) = match get_focused_pane_info() {
+            Ok(info) => info,
+            Err(_) => return false,
+        };
+
+        let cmd_args = match get_pane_running_command(pane_id) {
+            Ok(args) => args,
+            Err(_) => return false,
+        };
+
+        if cmd_args.is_empty() {
+            return false;
         }
-        false
+
+        // cmd_args[0] is the full command path, e.g. "/usr/bin/nvim"
+        let command = cmd_args[0].split('/').next_back().unwrap_or(&cmd_args[0]);
+        command == "nvim" || command == "vim"
     }
 
     fn parse_configuration(&mut self, configuration: BTreeMap<String, String>) {
@@ -141,7 +137,7 @@ impl State {
         input.split('+').map(|s| s.trim().parse::<Mod>()).collect()
     }
 
-    fn command_to_keybind(&mut self, command: &Command) -> String {
+    fn command_to_keybind(&self, command: &Command) -> String {
         let modifiers = match command {
             Command::MoveFocus(_) | Command::MoveFocusOrTab(_) => &self.move_mod,
             Command::Resize(_) => &self.resize_mod,
@@ -168,17 +164,6 @@ impl State {
 
         kitty_keybinding(direction, modifiers)
     }
-}
-
-fn term_command_from_client_list(clients: Vec<ClientInfo>) -> Option<String> {
-    for c in clients {
-        if c.is_current_client {
-            let command = c.running_command.split(' ').next()?;
-            let command = command.split('/').next_back()?;
-            return Some(command.to_string());
-        }
-    }
-    None
 }
 
 fn mod_to_kitty_protocol(modifier: &Mod) -> u8 {
