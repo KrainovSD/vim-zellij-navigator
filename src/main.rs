@@ -5,6 +5,7 @@ use std::str::FromStr;
 
 struct State {
     permissions_granted: bool,
+    pending_command: Option<Command>,
 
     // Configuration
     move_mod: Vec<Mod>,
@@ -41,7 +42,7 @@ impl ZellijPlugin for State {
             PermissionType::ChangeApplicationState,
             PermissionType::ReadApplicationState,
         ]);
-        subscribe(&[EventType::PermissionRequestResult]);
+        subscribe(&[EventType::PermissionRequestResult, EventType::ListClients]);
         if self.permissions_granted {
             hide_self();
         }
@@ -58,6 +59,16 @@ impl ZellijPlugin for State {
                     hide_self();
                 }
             }
+            Event::ListClients(list) => {
+                let has_active_client = list.iter().any(|c| c.is_current_client);
+                if has_active_client {
+                    if let Some(command) = self.pending_command.take() {
+                        self.handle_command(command);
+                    }
+                } else {
+                    self.pending_command = None;
+                }
+            }
             _ => {}
         }
         true
@@ -65,7 +76,8 @@ impl ZellijPlugin for State {
 
     fn pipe(&mut self, pipe_message: PipeMessage) -> bool {
         if let Some(command) = parse_command(pipe_message) {
-            self.handle_command(command);
+            self.pending_command = Some(command);
+            list_clients();
         }
         true
     }
@@ -75,6 +87,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             permissions_granted: false,
+            pending_command: None,
 
             move_mod: vec![Mod::Ctrl],
             resize_mod: vec![Mod::Alt],
